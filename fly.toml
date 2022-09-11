@@ -1,0 +1,41 @@
+# fly.toml file generated for protohackers-yulian on 2022-09-09T00:50:41-07:00
+
+app = "protohackers-yulian"
+kill_signal = "SIGINT"
+kill_timeout = 5
+
+[env]
+
+[[services]]
+  internal_port = 10001
+  protocol = "tcp"
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
+
+  [[services.ports]]
+    port = 10001
+
+[[services]]
+  internal_port = 10002
+  protocol = "tcp"
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
+
+  [[services.ports]]
+    port = 10002
+
+[[services]]
+  internal_port = 10003
+  protocol = "tcp"
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
+
+  [[services.ports]]
+    port = 10003
+
