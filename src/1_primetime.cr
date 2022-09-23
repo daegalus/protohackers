@@ -78,7 +78,7 @@ class ProtoHackers::PrimeTime
   end
 
   def initialize(host, port)
-    puts "Starting PrimeTime server"
+    puts "Starting PrimeTime server on #{host}:#{port}"
     server = TCPServer.new(host, port, 1000, true, true)
     server.tcp_nodelay = true
     while client = server.accept?

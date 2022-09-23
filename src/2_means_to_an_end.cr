@@ -24,7 +24,7 @@ class ProtoHackers::MeansToAnEnd
 
     while !client.closed? && client.peek != nil && client.peek.size > 0 && client.peek[0] != -1
       data = client.read_bytes(Data)
-      
+
       #puts "Received from #{client.remote_address}: #{data.inspect}"
       if data.char == 'I'.ord
         store[data.num1] = data.num2
@@ -52,7 +52,7 @@ class ProtoHackers::MeansToAnEnd
   end
 
   def initialize(host, port)
-    puts "Starting Means server"
+    puts "Starting Means server on #{host}:#{port}"
     server = TCPServer.new(host, port, 1000, true, true)
     server.tcp_nodelay = true
     while client = server.accept?

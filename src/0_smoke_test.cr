@@ -15,7 +15,7 @@ class ProtoHackers::SmokeTest
   end
 
   def initialize(host, port)
-    puts "Starting SmokeTest server"
+    puts "Starting SmokeTest server on #{host}:#{port}"
     server = TCPServer.new(host, port, 1000, true, true)
     server.tcp_nodelay = true
     while client = server.accept?
