@@ -50,3 +50,15 @@ kill_timeout = 5
   [[services.ports]]
     port = 10004
 
+[[services]]
+  internal_port = 10005
+  protocol = "udp"
+  [services.concurrency]
+    hard_limit = 25
+    soft_limit = 20
+    type = "connections"
+
+  [[services.ports]]
+    port = 10005
+
+
