@@ -7,21 +7,22 @@ require "regex"
 
 class ProtoHackers::MobInTheMiddle
   def handle_proxy(src, dest, is_server)
-    while line = src.gets
-      message = rewrite_boguscoin_address(line)
-      dest.puts message
+    while line = src.gets(chomp: false)
+      if line.ends_with?("\n")
+        message = rewrite_boguscoin_address(line)
+        dest.puts message
+      end
     end
 
-    if !is_server && src.closed?
-      dest.close unless dest.closed?
-    end
+    src.close unless src.closed?
+    dest.close unless dest.closed?
 
     puts "Connection closed for #{src.remote_address}"
   end
 
   def rewrite_boguscoin_address(message)
     target_address = "7YWHMfk9JZe0LM0g1ZauHuiSxhI"
-    regex = /([7][a-zA-Z0-9]{25,35})/
+    regex = /(^|(?<= ))7[a-zA-Z0-9]{25,34}($|(?= ))/
 
     if message =~ regex
       puts "Old Line: #{message}"
