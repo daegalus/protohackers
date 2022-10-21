@@ -6,26 +6,17 @@ require "regex"
 
 
 class ProtoHackers::MobInTheMiddle
-  def handle_client(client, chat)
-    puts "New client connected"
-    while true
-      if chat.closed?
-        puts "Proxy client disconnected"
-        client.close unless client.closed?
-        break
-      end
-      if client.closed?
-        puts "Client disconnected"
-        chat.close unless chat.closed?
-        break
-      end
-      while line = client.gets
-        message = rewrite_boguscoin_address(line)
-        chat.puts message
-        puts "Old line: #{line}\nNew line: #{message}"
-      end
+  def handle_proxy(src, dest, is_server)
+    while line = src.gets
+      message = rewrite_boguscoin_address(line)
+      dest.puts message
     end
-    puts "Client Connection closed for #{client.remote_address}"
+
+    if !is_server && src.closed?
+      dest.close unless dest.closed?
+    end
+
+    puts "Connection closed for #{src.remote_address}"
   end
 
   def rewrite_boguscoin_address(message)
@@ -33,33 +24,12 @@ class ProtoHackers::MobInTheMiddle
     regex = /([7][a-zA-Z0-9]{25,35})/
 
     if message =~ regex
+      puts "Old Line: #{message}"
       message = message.gsub(regex, target_address)
+      puts "New Line: #{message}"
     end
 
     return message
-  end
-
-  def handle_chat(chat, client)
-    puts "New proxy client connected"
-    while true
-      if chat.closed?
-        puts "Proxy client disconnected"
-        client.close unless client.closed?
-        break
-      end
-      if client.closed?
-        puts "Client disconnected"
-        chat.close unless chat.closed?
-        break
-      end
-      while line = chat.gets
-        message = rewrite_boguscoin_address(line)
-        client.puts message
-        puts "Old line: #{line}\nNew line: #{message}"
-      end
-    end
-
-    puts "Proxy connection closed for #{client.remote_address}"
   end
 
   def initialize(host, port)
@@ -67,14 +37,14 @@ class ProtoHackers::MobInTheMiddle
     server = TCPServer.new(host, port, 1000, true, true)
     server.tcp_nodelay = true
 
-    while true
-      while client = server.accept?
-        puts "Creating chat proxy for #{client.remote_address}..."
-        chat = TCPSocket.new("chat.protohackers.com", "16963")
-        chat.tcp_nodelay = true
-        spawn handle_client(client, chat)
-        spawn handle_client(chat, client)
-      end
+    while client = server.accept?
+      puts "Creating chat connection for #{client.remote_address}..."
+      chat = TCPSocket.new("chat.protohackers.com", "16963")
+      chat.tcp_nodelay = true
+      spawn handle_proxy(client, chat, false)
+      spawn handle_proxy(chat, client, true)
     end
+
+    puts "Proxy server shutting down..."
   end
 end
