@@ -76,8 +76,8 @@ kill_timeout = 5
   internal_port = 10007
   protocol = "tcp"
   [services.concurrency]
-    hard_limit = 25
-    soft_limit = 20
+    hard_limit = 200
+    soft_limit = 150
     type = "connections"
 
   [[services.ports]]
