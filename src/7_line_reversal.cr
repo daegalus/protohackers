@@ -6,7 +6,7 @@ require "io"
 def putfs(session_id, s)
   puts s
   File.open("log/#{session_id}.log", "a") do |file|
-      file.print "#{s}\n"
+    file.print "#{s}\n"
   end
 end
 
@@ -111,7 +111,7 @@ class ProtoHackers::LRCPServer
     data = data[1..-2]
 
     command, session_id, ordinal, body = "", "", "", ""
-    msg = data.split("/")
+    msg = data.split("/", 4)
 
     if msg.size == 2
       command, session_id = msg
@@ -161,63 +161,72 @@ class ProtoHackers::LRCPServer
     when ProtoHackers::AckMessage
       @@send_queue << ProtoHackers::CloseMessage.new(ip, message.session_id) if @@sessions[ip]?.nil?
 
-      if message.ordinal < @@sessions[ip].getLargestAckedOrdinal
-        putfs(message.session_id, "<!> ordinal #{message.ordinal} < acked #{@@sessions[ip].getLargestAckedOrdinal}")
+      session = @@sessions[ip]
+
+      if message.ordinal < session.getLargestAckedOrdinal
+        putfs(message.session_id, "<!> ordinal #{message.ordinal} < acked #{session.getLargestAckedOrdinal}")
         return
       end
 
-      if message.ordinal < @@sessions[ip].bytes_sent
-        putfs(message.session_id, "<<< ordinal #{message.ordinal} rsize #{@@sessions[ip].reversed_data.size}")
-        @@send_queue << ProtoHackers::DataMessage.new(ip, message.session_id, message.ordinal, @@sessions[ip].reversed_data[message.ordinal..-1])
+      if message.ordinal < session.bytes_sent
+        putfs(message.session_id, "<<< ordinal #{message.ordinal} rsize #{session.reversed_data.size}")
+        @@send_queue << ProtoHackers::DataMessage.new(ip, message.session_id, message.ordinal, session.reversed_data[message.ordinal..-1])
         return
       end
 
-      if message.ordinal > @@sessions[ip].bytes_sent
+      if message.ordinal > session.bytes_sent
         putfs(message.session_id, "<!! invalid")
         @@sessions.delete(ip)
         @@send_queue << ProtoHackers::CloseMessage.new(ip, message.session_id)
         return
       end
 
-      @@sessions[ip].last_message_time = Time.utc.to_unix
+      session.last_message_time = Time.utc.to_unix
       to_remove = [] of ProtoHackers::LRMessage
-      @@sessions[ip].unacked.each do |m|
-        to_remove << m if m.ordinal <= @@sessions[ip].getLargestAckedOrdinal
-        putfs(@@sessions[ip].session_id, "!!> adding to remove #{m}") if @@sessions[ip].getLargestAckedOrdinal
+      session.unacked.each do |m|
+        to_remove << m if m.ordinal <= message.ordinal
+        putfs(session.session_id, "!!> adding to remove #{m}") if session.getLargestAckedOrdinal
       end
       to_remove.each do |m|
-        unacked_msg = @@sessions[ip].unacked.delete(m)
-        @@sessions[ip].acked << unacked_msg unless unacked_msg.nil?
+        unacked_msg = session.unacked.delete(m)
+        session.acked << unacked_msg unless unacked_msg.nil?
       end
 
     when ProtoHackers::DataMessage
       @@send_queue << ProtoHackers::CloseMessage.new(ip, message.session_id) if @@sessions[ip]?.nil?
 
-      if message.ordinal < @@sessions[ip].bytes_sent
+      session = @@sessions[ip]
+
+      if message.ordinal < session.bytes_sent
         putfs(message.session_id, "<#> duplicate data")
         return
       end
 
-      if message.ordinal > @@sessions[ip].data.size
+      if message.ordinal > session.data.size
         putfs(message.session_id, "<?? missing data")
-        @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, @@sessions[ip].data.size.to_u32)
+        @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, session.data.size.to_u32)
         return
       end
 
-      return if message.data.size + message.ordinal < @@sessions[ip].data.size
-      start_pos = @@sessions[ip].data.size - message.ordinal
-      trimmed_data = message.data[start_pos..-1]
-      @@sessions[ip].data += trimmed_data
-      @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, @@sessions[ip].data.size.to_u32)
+      return if message.data.size + message.ordinal < session.data.size
+      start_pos = session.data.size - message.ordinal
+      trimmed_data = message.data[start_pos..]
+      putfs(message.session_id, "<?> #{message.data.gsub("\n", "\\n")}")
+      putfs(message.session_id, "<?> #{session.data.gsub("\n", "\\n")}")
+      session.data += trimmed_data
+      putfs(message.session_id, "<?> #{trimmed_data.gsub("\n", "\\n")}")
+      putfs(message.session_id, "<?> #{session.data.gsub("\n", "\\n")}")
+      @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, session.data.size.to_u32)
 
-      putfs(message.session_id, "!n> #{@@sessions[ip].data[-1] == '\n'}")
-      if @@sessions[ip].data.size > 0 && @@sessions[ip].data[-1] == '\n'
-        reversed_data = reverse_message(@@sessions[ip].data, @@sessions[ip].session_id)
-        data_message = ProtoHackers::DataMessage.new(ip, message.session_id, @@sessions[ip].bytes_sent, reversed_data)
+      putfs(message.session_id, "!n> #{session.data[-1] == '\n'}")
+      if session.data.size > 0 && session.data[-1] == '\n'
+        reversed_data = reverse_message(session.data, session.session_id)
+        putfs(message.session_id, "!r> #{reversed_data.gsub("\n", "\\n")}")
+        data_message = ProtoHackers::DataMessage.new(ip, message.session_id, session.bytes_sent, reversed_data)
+        session.reversed_data = reversed_data
+        session.bytes_sent = session.reversed_data.size.to_u32
+        session.unacked << data_message
         @@send_queue << data_message
-        @@sessions[ip].reversed_data = reversed_data
-        @@sessions[ip].bytes_sent = @@sessions[ip].reversed_data.size.to_u32
-        @@sessions[ip].unacked << data_message
       end
 
     else

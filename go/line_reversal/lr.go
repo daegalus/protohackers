@@ -12,6 +12,8 @@ import (
 	cmap "github.com/orcaman/concurrent-map/v2"
 )
 
+const ChunkSize = 500
+
 func New(conn *net.UDPConn) *LRServer {
 	lrs := &LRServer{
 		sessions: cmap.New[*LRSession](),
@@ -96,13 +98,38 @@ func (lrs *LRServer) HandleRequest(conn *net.UDPConn, buffer []byte, ip *net.UDP
 
 		// If the ordinal is less than the bytes we've sent so far, then resend missing data.
 		if msg.Ordinal < session.BytesSent {
-			resp := &LRMessage{
-				Command:   "data",
-				SessionID: msg.SessionID,
-				Ordinal:   msg.Ordinal,
-				Data:      session.Data[msg.Ordinal:],
+			chunks := chunks(session.RData[msg.Ordinal:], ChunkSize)
+			log.WithFields(log.Fields{"chunks": len(chunks), "bytesSent": session.BytesSent}).Info("Total chunks")
+
+			responses := []string{}
+			ordinal := msg.Ordinal
+			if len(session.RData) < ChunkSize {
+				data := &LRMessage{
+					Command:   "data",
+					SessionID: msg.SessionID,
+					Ordinal:   msg.Ordinal,
+					Data:      session.RData[msg.Ordinal:],
+				}
+				session.Unacked.Set(msg.SessionID, data)
+				responses = append(responses, data.EncodeMessage())
+			} else {
+
+				for _, chunk := range chunks {
+					data := &LRMessage{
+						Command:   "data",
+						SessionID: msg.SessionID,
+						Ordinal:   ordinal,
+						Data:      chunk,
+					}
+					session.Unacked.Set(msg.SessionID, data)
+					responses = append(responses, data.EncodeMessage())
+					ordinal += uint32(len(chunk))
+				}
 			}
-			return []string{resp.EncodeMessage()}
+			if ordinal > session.BytesSent {
+				session.BytesSent = ordinal
+			}
+			return responses
 		}
 
 		// If the ordinal is greater than the bytes we've sent so far, client is misbehaving.
@@ -178,10 +205,10 @@ func (lrs *LRServer) HandleRequest(conn *net.UDPConn, buffer []byte, ip *net.UDP
 		if len(session.Data) > 0 && session.Data[len(session.Data)-1:] == "\n" {
 			session.ReverseMessage()
 
-			chunks := chunks(session.RData, 789)
+			chunks := chunks(session.RData[session.BytesSent:], ChunkSize)
 			log.WithFields(log.Fields{"chunks": len(chunks), "bytesSent": session.BytesSent}).Info("Total chunks")
 
-			if len(session.RData) < 789 {
+			if len(session.RData[session.BytesSent:]) < ChunkSize {
 				data := &LRMessage{
 					Command:   "data",
 					SessionID: msg.SessionID,
