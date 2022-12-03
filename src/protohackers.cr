@@ -1,3 +1,5 @@
+require "log"
+
 require "./0_smoke_test"
 require "./1_primetime"
 require "./2_means_to_an_end"
@@ -10,7 +12,32 @@ require "./7_line_reversal"
 module ProtoHackers
   VERSION = "0.1.0"
 
+  SFBackend = SessionFileBackend.new("", "log/ph.log", "a")
+  MemBackend = ::Log::MemoryBackend.new
+
+  ::Log.setup do |c|
+    c.bind "ph", :debug, ::Log::IOBackend.new
+    c.bind "ph.user.*", :debug, MemBackend
+  end
+
+  Log = ::Log.for("ph")
+
+  Signal::INT.trap do
+    Log.info { "Exiting..." }
+    session_ids = MemBackend.entries.map { |e| e.data[:session_id] }.uniq
+
+    session_ids.each do |session_id|
+      SFBackend.session_id = session_id.to_s
+      session_entries = MemBackend.entries.select { |e| e.data[:session_id] == session_id }
+      session_entries.each {|se| SFBackend.write(se)}
+    end
+
+    SFBackend.close
+    exit
+  end
+
   def self.run
+    Log.info &.emit("Starting ProtoHackers", version: VERSION)
     spawn ProtoHackers::SmokeTest.new("0.0.0.0", 10001)
     spawn ProtoHackers::PrimeTime.new("0.0.0.0", 10002)
     spawn ProtoHackers::MeansToAnEnd.new("0.0.0.0", 10003)
@@ -25,3 +52,24 @@ module ProtoHackers
 end
 
 ProtoHackers.run
+
+
+
+class SessionFileBackend < ::Log::IOBackend
+  def session_id=(@session_id : String)
+    @io = File.new("log/user.#{@session_id}.log", "a")
+  end
+
+  def initialize(@session_id : String, file_name : String, mode : String = "a", *, formatter : Log::Formatter = Log::ShortFormat)
+    super File.new(file_name, mode), formatter: formatter, dispatcher: :sync
+  end
+
+  def initialize(@session_id : String, file : File, *, formatter : Log::Formatter = Log::ShortFormat)
+    super file, formatter: formatter, dispatcher: :sync
+  end
+
+  def close
+    @io.close
+    super
+  end
+end
