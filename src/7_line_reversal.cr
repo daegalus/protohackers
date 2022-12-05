@@ -4,12 +4,7 @@ require "bindata"
 require "io"
 require "log"
 
-def putfs(session_id, s)
-  puts s
-  File.open("log/#{session_id}.log", "a") do |file|
-    file.print "#{s}\n"
-  end
-end
+CHUNK_SIZE = 500
 
 def setup_session_log(session_id : String)
   ProtoHackers::Log.for("user.#{session_id}")
@@ -35,11 +30,15 @@ class ProtoHackers::LRState
     @send_queue << message
   end
 
-  def self.get_session(session_id : String)
+  def self.get_message : ProtoHackers::LRMessage
+    @send_queue.shift
+  end
+
+  def self.get_session(session_id : String) : ProtoHackers::LRSession
     @sessions[session_id]
   end
 
-  def self.exists_session(session_id : String)
+  def self.exists_session(session_id : String) : Bool
     @sessions.has_key?(session_id)
   end
 end
@@ -151,7 +150,7 @@ class ProtoHackers::LRCPServer
     data = data.strip("\x00")
 
     return nil if data.size < 3
-    return nil if !data.starts_with?("/") && !data.ends_with?("/")
+    return nil if !data.starts_with?("/") || !data.ends_with?("/")
 
     data = data[1..-2]
 
@@ -169,6 +168,7 @@ class ProtoHackers::LRCPServer
       return nil if command != "data"
 
       return nil if body =~ /(?:[^\\])\//
+      return nil if body.empty?
     else
       return nil
     end
@@ -188,13 +188,21 @@ class ProtoHackers::LRCPServer
       ProtoHackers::AckMessage.new(ip, session_id, ordinal.to_u32)
     when "data"
       return nil if ordinal.to_u32?.nil?
-      body = body.gsub("\\/", "/").gsub("\\\\", "\\")
+      return nil if body.empty?
+      body = body.gsub("\\\\", "\\").gsub("\\/", "/")
       return nil if body.empty?
       ProtoHackers::DataMessage.new(ip, session_id, ordinal.to_u32, body)
     else
       log.info &.emit("[?] Unknown command", { :command => command, :session_id => session_id })
       nil
     end
+  end
+
+  def chunks(data : String, chunk_size : Int32 = CHUNK_SIZE) : Array(String)
+    return [] of String if data.size == 0
+    return [data] if chunk_size >= data.size
+
+    data.each_char.in_groups_of(chunk_size).map(&.join).to_a
   end
 
   def handle_connect(ip : Socket::IPAddress, message : ProtoHackers::ConnectMessage)
@@ -221,15 +229,27 @@ class ProtoHackers::LRCPServer
 
     if message.ordinal < session.bytes_sent
       log.info &.emit "<<< ordinal #{message.ordinal} rsize #{session.reversed_data.size}", {:session_id => message.session_id}
-      data_msg = ProtoHackers::DataMessage.new(ip, message.session_id, message.ordinal, session.reversed_data[message.ordinal..])
-      @@send_queue << data_msg
-      session.unacked << data_msg
+      if session.reversed_data[message.ordinal..].size <= CHUNK_SIZE
+        data_message = ProtoHackers::DataMessage.new(ip, message.session_id, message.ordinal, session.reversed_data[message.ordinal..])
+        session.unacked << data_message
+        @@send_queue << data_message
+      else
+        ordinal = message.ordinal
+        chunked_data = chunks(session.reversed_data[message.ordinal..])
+        puts "ChunksA #{message.session_id}: #{chunked_data.size}"
+        chunked_data.each do |chunk|
+          data_message = ProtoHackers::DataMessage.new(ip, message.session_id, ordinal, chunk)
+          session.unacked << data_message
+          @@send_queue << data_message
+          ordinal += chunk.size
+        end
+      end
       return
     end
 
     if message.ordinal > session.bytes_sent
       log.warn &.emit "<!! invalid", {:session_id => message.session_id}
-      @@sessions.delete(session.session_id)
+      @@sessions.delete(message.session_id)
       @@send_queue << ProtoHackers::CloseMessage.new(ip, message.session_id)
       return
     end
@@ -267,21 +287,29 @@ class ProtoHackers::LRCPServer
     return if message.data.size + message.ordinal < session.data.size
     start_pos = session.data.size - message.ordinal
     trimmed_data = message.data[start_pos..]
-    log.info &.emit "<?>", {:data => message.data, :session_id => message.session_id}
-    log.info &.emit "<?>", {:data => session.data, :session_id => message.session_id}
     session.data += trimmed_data
-    log.info &.emit "<?>", {:data => trimmed_data, :session_id => message.session_id}
-    log.info &.emit "<?>", {:data => session.data, :session_id => message.session_id}
     @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, session.data.size.to_u32)
 
     log.info &.emit "!n>", {:is_new_line => session.data.chars.last == '\n', :session_id => message.session_id} if !session.data.empty?
     if !session.data.empty? && session.data.chars.last == '\n'
       session.reverse_message
       log.info &.emit "!r>", { :reveresed_data => session.reversed_data.gsub("\n", "\\n"), :session_id => message.session_id}
-      data_message = ProtoHackers::DataMessage.new(ip, message.session_id, session.bytes_sent, session.reversed_data[session.bytes_sent..])
-      session.bytes_sent = session.reversed_data.size.to_u32
-      session.unacked << data_message
-      @@send_queue << data_message
+      
+      if session.reversed_data[session.bytes_sent..].size <= CHUNK_SIZE
+        data_message = ProtoHackers::DataMessage.new(ip, message.session_id, session.bytes_sent, session.reversed_data[session.bytes_sent..])
+        session.bytes_sent = session.reversed_data.size.to_u32
+        session.unacked << data_message
+        @@send_queue << data_message
+      else
+        chunked_data = chunks(session.reversed_data[session.bytes_sent..])
+        puts "ChunksD #{message.session_id}: #{chunked_data.size}"
+        chunked_data.each do |chunk|
+          data_message = ProtoHackers::DataMessage.new(ip, message.session_id, session.bytes_sent, chunk)
+          session.bytes_sent += chunk.size.to_u32
+          session.unacked << data_message
+          @@send_queue << data_message
+        end
+      end
     end
   end
 

@@ -14,4 +14,4 @@ dependencies:
   bindata:
     github: spider-gazelle/bindata
 
-license: MIT
+license: ISC
