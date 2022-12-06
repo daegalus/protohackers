@@ -11,34 +11,38 @@ def setup_session_log(session_id : String)
 end
 
 class ProtoHackers::LRState
-  property sessions, send_queue
+  property sessions, send_channel
 
   def initialize
     @sessions = {} of String => ProtoHackers::LRSession
-    @send_queue = [] of ProtoHackers::LRMessage
+    @send_channel = Channel(ProtoHackers::LRMessage).new
   end
 
-  def self.add_session(session : ProtoHackers::LRSession)
+  def +(session : ProtoHackers::LRSession)
     @sessions[session.session_id] = session
   end
 
-  def self.remove_session(session : ProtoHackers::LRSession)
+  def -(session : ProtoHackers::LRSession)
     @sessions.delete(session.session_id)
   end
 
-  def self.send_message(message : ProtoHackers::LRMessage)
-    @send_queue << message
+  def -(session_id : String)
+    @sessions.delete(session_id)
   end
 
-  def self.get_message : ProtoHackers::LRMessage
-    @send_queue.shift
+  def <<(message : ProtoHackers::LRMessage)
+    @send_channel.send(message)
   end
 
-  def self.get_session(session_id : String) : ProtoHackers::LRSession
+  def >> : ProtoHackers::LRMessage
+    @send_channel.receive
+  end
+
+  def [](session_id : String) : ProtoHackers::LRSession
     @sessions[session_id]
   end
 
-  def self.exists_session(session_id : String) : Bool
+  def exists?(session_id : String) : Bool
     @sessions.has_key?(session_id)
   end
 end
@@ -59,7 +63,7 @@ class ProtoHackers::ConnectMessage < ProtoHackers::LRMessage
 
   def send(server : UDPSocket, ordinal : UInt32 = 0)
     log = setup_session_log(@session_id)
-    log.info &.emit( "-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :resends => @resends.to_s})
+    log.info &.emit("-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :resends => @resends.to_s})
     server.send("/#{@command}/#{@session_id}/", to: @ip)
   end
 end
@@ -71,7 +75,7 @@ class ProtoHackers::DataMessage < ProtoHackers::LRMessage
 
   def send(server : UDPSocket)
     log = setup_session_log(@session_id)
-    log.info &.emit( "-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :ordinal => @ordinal.to_s, :resends => @resends.to_s, :data => @data})
+    log.info &.emit("-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :ordinal => @ordinal.to_s, :resends => @resends.to_s, :data => @data})
     server.send("/#{@command}/#{@session_id}/#{@ordinal}/#{@data.gsub("/", "\\/").gsub("\\", "\\\\")}/", to: @ip)
   end
 end
@@ -83,7 +87,7 @@ class ProtoHackers::AckMessage < ProtoHackers::LRMessage
 
   def send(server : UDPSocket)
     log = setup_session_log(@session_id)
-    log.info &.emit( "-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :ordinal => @ordinal.to_s, :resends => @resends.to_s})
+    log.info &.emit("-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :ordinal => @ordinal.to_s, :resends => @resends.to_s})
     server.send("/#{@command}/#{@session_id}/#{@ordinal}/", to: @ip)
   end
 end
@@ -95,7 +99,7 @@ class ProtoHackers::CloseMessage < ProtoHackers::LRMessage
 
   def send(server : UDPSocket)
     log = setup_session_log(@session_id)
-    log.info &.emit( "-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :resends => @resends.to_s})
+    log.info &.emit("-->", {:ip => @ip.to_s, :command => @command, :session_id => @session_id, :resends => @resends.to_s})
     server.send("/#{@command}/#{@session_id}/", to: @ip)
   end
 end
@@ -113,9 +117,7 @@ class ProtoHackers::LRSession
   end
 
   def getLargestAckedOrdinal : UInt32
-    if @acked.size == 0
-      return 0.to_u32
-    end
+    return 0.to_u32 if @acked.size == 0
     return @acked.max_by(&.ordinal).ordinal
   end
 
@@ -128,20 +130,19 @@ class ProtoHackers::LRSession
 end
 
 class ProtoHackers::LRCPServer
-  @@sessions = {} of String => ProtoHackers::LRSession
-  @@send_queue = [] of ProtoHackers::LRMessage
+  property server : UDPSocket, state : ProtoHackers::LRState
 
-  property server : UDPSocket
-
-  def initialize(@server : UDPSocket)
+  def initialize(@server : UDPSocket, @state : ProtoHackers::LRState)
   end
 
   def outbound
-    while true
-      if @@send_queue.size > 0
-        @@send_queue.shift.send(@server)
-      else
-        sleep 0.1
+    loop do
+      msg = @state.>>
+      begin
+        msg.send(@server)
+      rescue ex
+        log = setup_session_log(msg.session_id)
+        log.error &.emit("Error sending message", {:session_id => msg.session_id, :error => ex.message})
       end
     end
   end
@@ -176,7 +177,7 @@ class ProtoHackers::LRCPServer
     return nil if session_id.to_u32?.nil?
 
     log = setup_session_log(session_id)
-    log.info &.emit( "<d-", {:ip => ip.to_s, :command => command, :session_id => session_id, :ordinal => ordinal, :data => body})
+    log.info &.emit("<d-", {:ip => ip.to_s, :command => command, :session_id => session_id, :ordinal => ordinal, :data => body})
 
     case command
     when "connect"
@@ -193,7 +194,7 @@ class ProtoHackers::LRCPServer
       return nil if body.empty?
       ProtoHackers::DataMessage.new(ip, session_id, ordinal.to_u32, body)
     else
-      log.info &.emit("[?] Unknown command", { :command => command, :session_id => session_id })
+      log.info &.emit("[?] Unknown command", {:command => command, :session_id => session_id})
       nil
     end
   end
@@ -206,20 +207,20 @@ class ProtoHackers::LRCPServer
   end
 
   def handle_connect(ip : Socket::IPAddress, message : ProtoHackers::ConnectMessage)
-    @@sessions[message.session_id] = ProtoHackers::LRSession.new(ip, message.session_id) if @@sessions[message.session_id]?.nil?
-    @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, 0)
+    @state + ProtoHackers::LRSession.new(ip, message.session_id) unless @state.exists?(message.session_id)
+    @state << ProtoHackers::AckMessage.new(ip, message.session_id, 0)
   end
 
   def handle_close(ip : Socket::IPAddress, message : ProtoHackers::CloseMessage)
-    @@sessions.delete(message.session_id)
-    @@send_queue << message
+    @state - message.session_id
+    @state << message
   end
 
   def handle_ack(ip : Socket::IPAddress, message : ProtoHackers::AckMessage)
-    @@send_queue << ProtoHackers::CloseMessage.new(ip, message.session_id) if @@sessions[message.session_id]?.nil?
-    return if @@sessions[message.session_id]?.nil?
+    @state << ProtoHackers::CloseMessage.new(ip, message.session_id) unless @state.exists?(message.session_id)
+    return unless @state.exists?(message.session_id)
 
-    session = @@sessions[message.session_id]
+    session = @state[message.session_id]
     log = setup_session_log(session.session_id)
 
     if message.ordinal < session.getLargestAckedOrdinal
@@ -232,15 +233,14 @@ class ProtoHackers::LRCPServer
       if session.reversed_data[message.ordinal..].size <= CHUNK_SIZE
         data_message = ProtoHackers::DataMessage.new(ip, message.session_id, message.ordinal, session.reversed_data[message.ordinal..])
         session.unacked << data_message
-        @@send_queue << data_message
+        @state << data_message
       else
         ordinal = message.ordinal
         chunked_data = chunks(session.reversed_data[message.ordinal..])
-        puts "ChunksA #{message.session_id}: #{chunked_data.size}"
         chunked_data.each do |chunk|
           data_message = ProtoHackers::DataMessage.new(ip, message.session_id, ordinal, chunk)
           session.unacked << data_message
-          @@send_queue << data_message
+          @state << data_message
           ordinal += chunk.size
         end
       end
@@ -249,8 +249,8 @@ class ProtoHackers::LRCPServer
 
     if message.ordinal > session.bytes_sent
       log.warn &.emit "<!! invalid", {:session_id => message.session_id}
-      @@sessions.delete(message.session_id)
-      @@send_queue << ProtoHackers::CloseMessage.new(ip, message.session_id)
+      @state - message.session_id
+      @state << ProtoHackers::CloseMessage.new(ip, message.session_id)
       return
     end
 
@@ -267,10 +267,10 @@ class ProtoHackers::LRCPServer
   end
 
   def handle_data(ip : Socket::IPAddress, message : ProtoHackers::DataMessage)
-    @@send_queue << ProtoHackers::CloseMessage.new(ip, message.session_id) if @@sessions[message.session_id]?.nil?
-    return if @@sessions[message.session_id]?.nil?
+    @state << ProtoHackers::CloseMessage.new(ip, message.session_id) unless @state.exists?(message.session_id)
+    return unless @state.exists?(message.session_id)
 
-    session = @@sessions[message.session_id]
+    session = @state[message.session_id]
     log = setup_session_log(message.session_id)
 
     if message.ordinal < session.bytes_sent
@@ -280,7 +280,7 @@ class ProtoHackers::LRCPServer
 
     if message.ordinal > session.data.size
       log.warn &.emit "<?? missing data", {:session_id => message.session_id}
-      @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, session.data.size.to_u32)
+      @state << ProtoHackers::AckMessage.new(ip, message.session_id, session.data.size.to_u32)
       return
     end
 
@@ -288,26 +288,25 @@ class ProtoHackers::LRCPServer
     start_pos = session.data.size - message.ordinal
     trimmed_data = message.data[start_pos..]
     session.data += trimmed_data
-    @@send_queue << ProtoHackers::AckMessage.new(ip, message.session_id, session.data.size.to_u32)
+    @state << ProtoHackers::AckMessage.new(ip, message.session_id, session.data.size.to_u32)
 
     log.info &.emit "!n>", {:is_new_line => session.data.chars.last == '\n', :session_id => message.session_id} if !session.data.empty?
     if !session.data.empty? && session.data.chars.last == '\n'
       session.reverse_message
-      log.info &.emit "!r>", { :reveresed_data => session.reversed_data.gsub("\n", "\\n"), :session_id => message.session_id}
-      
+      log.info &.emit "!r>", {:reveresed_data => session.reversed_data.gsub("\n", "\\n"), :session_id => message.session_id}
+
       if session.reversed_data[session.bytes_sent..].size <= CHUNK_SIZE
         data_message = ProtoHackers::DataMessage.new(ip, message.session_id, session.bytes_sent, session.reversed_data[session.bytes_sent..])
         session.bytes_sent = session.reversed_data.size.to_u32
         session.unacked << data_message
-        @@send_queue << data_message
+        @state << data_message
       else
         chunked_data = chunks(session.reversed_data[session.bytes_sent..])
-        puts "ChunksD #{message.session_id}: #{chunked_data.size}"
         chunked_data.each do |chunk|
           data_message = ProtoHackers::DataMessage.new(ip, message.session_id, session.bytes_sent, chunk)
           session.bytes_sent += chunk.size.to_u32
           session.unacked << data_message
-          @@send_queue << data_message
+          @state << data_message
         end
       end
     end
@@ -319,7 +318,7 @@ class ProtoHackers::LRCPServer
 
     log = setup_session_log(message.session_id)
 
-    log.info &.emit "<--", { :ip => ip.to_s, :command => message.command, :session_id => message.session_id, :ordinal => message.ordinal.to_s, :resends =>message.resends.to_s, :data => message.data}
+    log.info &.emit "<--", {:ip => ip.to_s, :command => message.command, :session_id => message.session_id, :ordinal => message.ordinal.to_s, :resends => message.resends.to_s, :data => message.data}
 
     case message
     when ProtoHackers::ConnectMessage
@@ -331,31 +330,34 @@ class ProtoHackers::LRCPServer
     when ProtoHackers::DataMessage
       handle_data(ip, message)
     else
-      log.warn &.emit "[?]", { :ip => ip.to_s, :command => message.command, :session_id => message.session_id, :ordinal => message.ordinal.to_s, :resends =>message.resends.to_s }
+      log.warn &.emit "[?]", {:ip => ip.to_s, :command => message.command, :session_id => message.session_id, :ordinal => message.ordinal.to_s, :resends => message.resends.to_s}
     end
   end
 
-  def self.unacked_reaper
-    @@sessions.each do |session_id, session|
-      to_remove = [] of ProtoHackers::LRMessage
-      session.unacked.each do |unacked|
-        if unacked.ordinal >= session.getLargestAckedOrdinal
-          current_time = Time.utc.to_unix
-          if unacked.resends > 20
-            to_remove << unacked
-          elsif current_time - session.last_message_time > 3
-            @@send_queue << unacked
-            session.last_message_time = current_time
-            unacked.resends += 1
+  def unacked_reaper
+    loop do
+      @state.sessions.each do |session_id, session|
+        to_remove = [] of ProtoHackers::LRMessage
+        session.unacked.each do |unacked|
+          if unacked.ordinal >= session.getLargestAckedOrdinal
+            current_time = Time.utc.to_unix
+            if unacked.resends > 20
+              to_remove << unacked
+            elsif current_time - session.last_message_time > 3
+              @state << unacked
+              session.last_message_time = current_time
+              unacked.resends += 1
+            end
+          else
+            acked = session.unacked.delete(unacked)
+            session.acked << acked unless acked.nil?
           end
-        else
-          acked = session.unacked.delete(unacked)
-          session.acked << acked unless acked.nil?
+        end
+        to_remove.each do |unacked|
+          session.unacked.delete(unacked)
         end
       end
-      to_remove.each do |unacked|
-        session.unacked.delete(unacked)
-      end
+      sleep 3.seconds
     end
   end
 end
@@ -375,14 +377,9 @@ class ProtoHackers::LineReversal
     server = UDPSocket.new
     server.bind host, port
 
-    spawn do
-      loop do
-        ProtoHackers::LRCPServer.unacked_reaper
-        sleep 3.seconds
-      end
-    end
+    lrcp = ProtoHackers::LRCPServer.new(server, state)
 
-    lrcp = ProtoHackers::LRCPServer.new(server)
+    spawn lrcp.unacked_reaper
     spawn lrcp.outbound
 
     loop do
