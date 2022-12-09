@@ -15,7 +15,7 @@ enum CipherType : UInt8
   APOS    = 0x05
 end
 
-CIPHER_TEST = "ThIs ShOulD Not = Self"
+CIPHER_TEST = "127x turnips\n"
 
 record Cipher, cipher_type : CipherType, extra_info : UInt8 = 0 do
   def to_s
@@ -52,37 +52,35 @@ class ProtoHackers::InsecureSocketLayer
 
     ciphers = parse_ciphers(cipher_message)
 
-    client.close if apply_ciphers(ciphers, CIPHER_TEST, 0) == CIPHER_TEST
+    client.close if apply_ciphers(ciphers.reverse, CIPHER_TEST.bytes, 0) == CIPHER_TEST
     log.info &.emit("~~~", {:ciphers => ciphers.map(&.to_s).join(", ")})
 
-    accumulator = [] of Char
-    message = ""
-    start_index = 0
+    accumulator = [] of UInt8
+    message = [] of UInt8
     resp_pos = 0
-    client.each_char do |message_byte|
+    client.each_byte do |message_byte|
+        #log.info &.emit("...", {:message_byte => message_byte.to_s})
         accumulator << message_byte
+        #log.info &.emit("...", {:accumulator => accumulator.join})
 
-        decoded_message = apply_ciphers(ciphers.reverse, message_byte.to_s, start_index + cipher_message.size)
+        decoded_message = apply_ciphers(ciphers.reverse, [message_byte], accumulator.size)
+        log.info &.emit("...", {:decoded_message => decoded_message.map(&.unsafe_chr).join})
         message += decoded_message
 
-        if decoded_message == "\n"
-          if message == accumulator[start_index..].join
-            log.info &.emit("xxx", {:message => message.inspect})
-            client.close unless client.closed?
-            return
-          end
+        if decoded_message.map(&.unsafe_chr).join == "\n"
+          log.info &.emit("-->", {:message => message.map(&.unsafe_chr).join})
           respo_pos = process_message(client, ciphers, message, resp_pos)
-          start_index += message.size
-          message = ""
+          message = [] of UInt8
         end
     end
 
     client.close unless client.closed?
   end
 
-  def process_message(client : TCPSocket, ciphers : Array(Cipher), decoded_message : String, pos : Int32)
+  def process_message(client : TCPSocket, ciphers : Array(Cipher), decoded_message_bytes : Array(UInt8), pos : Int32)
     log = ProtoHackers::Log.for("isl")
 
+    decoded_message = decoded_message_bytes.map(&.unsafe_chr).join
     log.info &.emit("###", {:message => decoded_message})
     max_match = decoded_message.split(",").map { |s| /(?<count>\d+)x (?<toy>[\w\s\-]+)/.match(s) }.max_by do |m|
       count = m["count"].to_i if m
@@ -94,27 +92,44 @@ class ProtoHackers::InsecureSocketLayer
 
     log.info &.emit("<r>", {:response => response})
 
-    client.puts apply_ciphers(ciphers, response, pos + decoded_message.size)
+    encoded_response = apply_ciphers(ciphers, response.bytes, pos)
+    encoded_slice = Slice(UInt8).new(encoded_response.size)
+    encoded_response.each_with_index { |b, i| encoded_slice[i] = b }
+
+    client.write encoded_slice
     return pos + decoded_message.size
   end
 
-  def apply_ciphers(ciphers : Array(Cipher), message : String, pos : Int32) : String
+  def reverse_bits(byte : UInt8) : UInt8
+    byte = (byte & 0xF0) >> 4 | (byte & 0x0F) << 4
+    byte = (byte & 0xCC) >> 2 | (byte & 0x33) << 2
+    byte = (byte & 0xAA) >> 1 | (byte & 0x55) << 1
+    byte
+  end
+
+  def apply_ciphers(ciphers : Array(Cipher), bytes : Array(UInt8), pos : Int32) : Array(UInt8)
+    log = ProtoHackers::Log.for("isl")
     ciphers.each do |cipher|
       case cipher.cipher_type
       when CipherType::REVERSE
-        message = message.each_byte.map { |c| BitArray.new(c).reverse!.to_slice.first.unsafe_chr }.join
+
+        bytes = bytes.map { |c|
+          log.info &.emit("rc.", {:c => c.to_s})
+          reverse_bits(c)
+        }
+        break
       when CipherType::XOR
-        message = message.each_byte.map { |c| (c ^ (cipher.extra_info % 256)).unsafe_chr }.join
+        bytes = bytes.map { |c| (c ^ (cipher.extra_info % 256)) }
       when CipherType::XORPOS
-        message = message.each_byte.map_with_index { |c, i| (c ^ (pos + i % 256)).unsafe_chr }.join
+        bytes = bytes.map_with_index { |c, i| c ^ ((pos + i) % 256) }
       when CipherType::ADD
-        message = message.each_byte.map { |c| (c + (cipher.extra_info % 256)).unsafe_chr }.join
+        bytes = bytes.map(&.&+ cipher.extra_info)
       when CipherType::APOS
-        message = message.each_byte.map_with_index { |c, i| (c + (pos + i % 256)).unsafe_chr }.join
+        bytes = bytes.map_with_index { |c, i| c &+ ((pos + i) % 256) }
       end
     end
 
-    message
+    bytes
   end
 
   def parse_ciphers(message : Array(UInt8)) : Array(Cipher)
