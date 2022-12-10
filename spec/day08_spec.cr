@@ -97,5 +97,12 @@ describe ProtoHackers::InsecureSocketLayer do
       ph = create_obj
       ph.apply_ciphers([create_cipher_addpos], HELLO_WORLD, 256.to_u8!).should eq EXPECTED_ADDPOS
     end
+
+    it "should apply ADDPOS, XORPOS correctly" do
+      ph = create_obj
+      encode = ph.apply_ciphers([create_cipher_addpos, create_cipher_xorpos], HELLO_WORLD, 0)
+      decode = ph.apply_ciphers([create_cipher_xorpos, create_cipher_addpos], encode, 0, is_decode: true)
+      decode.should eq HELLO_WORLD
+    end
   end
 end

@@ -57,8 +57,6 @@ end
 
 ProtoHackers.run
 
-
-
 class SessionFileBackend < ::Log::IOBackend
   def session_id=(@session_id : String)
     @io = File.new("log/user.#{@session_id}.log", "a")
