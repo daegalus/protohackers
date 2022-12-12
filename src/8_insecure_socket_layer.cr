@@ -27,7 +27,7 @@ record Cipher, cipher_type : CipherType, extra_info : UInt8 = 0 do
   end
 end
 
-record ProtoHackers::ISLSession, client : TCPSocket, remote_address : String, ciphers : Array(Cipher), accumulator = [] of UInt8, message = [] of UInt8, resp_pos = 0 do
+record ProtoHackers::ISLSession, client : TCPSocket, remote_address : String, ciphers : Array(Cipher), accumulator = [] of UInt8, message = [] of UInt8, processing_message = "", processed_pos = 0 do
   def message=(value)
     @message = value
   end
@@ -38,13 +38,10 @@ record ProtoHackers::ISLSession, client : TCPSocket, remote_address : String, ci
 
   def process_message
     log = ProtoHackers::Log.for("isl")
+    #log.info &.emit("###", {:message => @processing_message})
+    return if @processing_message.empty? #|| decoded_message.index("\n").nil?
 
-    decoded_message = @message.map(&.unsafe_chr).join
-    #decoded_message.chars[-1] = '\n' if !decoded_message.empty? && decoded_message[-1] == "."
-    log.info &.emit("###", {:message => decoded_message})
-    return if decoded_message.empty? #|| decoded_message.index("\n").nil?
-
-    items = decoded_message.split(",").map{|s| {count: s[/\d+/].to_i, original_string: s}}
+    items = @processing_message.split(",").reject(&.empty?).map{|s| {count: s[/\d+/].to_i, original_string: s}}
     response = items.max_by{|m| m[:count]}
     return if response.nil?
     response = response[:original_string]
@@ -52,13 +49,36 @@ record ProtoHackers::ISLSession, client : TCPSocket, remote_address : String, ci
 
     log.info &.emit("<r>", {:address => @client.remote_address.inspect, :ciphers => ciphers.map(&.to_s).join(", "), :response => response})
 
-    encoded_response = ProtoHackers::InsecureSocketLayer.apply_ciphers(@ciphers, response.bytes, @resp_pos.to_u32)
+    encoded_response = ProtoHackers::InsecureSocketLayer.apply_ciphers(@ciphers, response.bytes, @processed_pos.to_u32)
     encoded_slice = Slice(UInt8).new(encoded_response.size)
     encoded_response.each_with_index { |b, i| encoded_slice[i] = b }
 
     @client.write encoded_slice unless @client.closed?
-    @resp_pos += decoded_message.size
-    @message.clear
+    @processed_pos += @processing_message.size
+  end
+
+  def handle
+    log = ProtoHackers::Log.for("isl")
+    while !@client.closed?
+      buf = Bytes.new(5000)
+      len = @client.read(buf)
+      msg = buf[0, len]
+
+      sleep 0.1 if msg.empty?
+      next if msg.empty?
+
+      #puts msg.hexdump
+      decoded_message = ProtoHackers::InsecureSocketLayer.apply_ciphers(@ciphers.reverse, msg.to_a, @accumulator.size.to_u32, is_decode: true)
+      #log.info &.emit("<<<", {:message => decoded_message.map(&.unsafe_chr).join})
+      @accumulator += msg.to_a
+      @message += decoded_message
+      newline_index = @message[@processed_pos...].map(&.unsafe_chr).join.index("\n")
+      next if newline_index.nil?
+
+      newline_index = @processed_pos+newline_index+1
+      @processing_message = @message[@processed_pos...newline_index].map(&.unsafe_chr).join
+      process_message
+    end
   end
 end
 
@@ -100,38 +120,13 @@ class ProtoHackers::InsecureSocketLayer
     return if client.closed?
     log.info &.emit("~~~", {:ciphers => ciphers.map(&.to_s).join(", ")})
 
-    session = @sessions[client.remote_address.to_s] ||= ProtoHackers::ISLSession.new(client, client.remote_address.to_s, ciphers, [] of UInt8, [] of UInt8, 0)
+    session = @sessions[client.remote_address.to_s] ||= ProtoHackers::ISLSession.new(client, client.remote_address.to_s, ciphers, [] of UInt8, [] of UInt8)
     @sessions[client.remote_address.to_s] = session if @sessions[client.remote_address.to_s].nil?
 
-
-    while !session.client.closed?
-      buf = Bytes.new(5000)
-      len = session.client.read(buf)
-      msg = buf[0, len]
-
-      sleep 0.1 if msg.empty?
-      next if msg.empty?
-
-      #puts msg.hexdump
-      session.accumulator += msg.to_a
-      decoded_message = ProtoHackers::InsecureSocketLayer.apply_ciphers(session.ciphers.reverse, msg.to_a, session.accumulator.size.to_u32 - msg.size.to_u32, is_decode: true)
-      session.message += decoded_message
-
-
-      split = session.message.map(&.unsafe_chr).join.split("\n")
-      split_end = split[-1] if split[-1].nil? || ""
-
-      split[..-1].each do |line|
-        next if line.empty?
-
-        session.message = line.bytes
-        session.process_message
-      end
-      session.message += split_end.bytes unless split_end.nil?
-    end
-
-
-    client.close unless client.closed?
+    log.info &.emit("&&&", {:session => session.remote_address.inspect, :ciphers => session.ciphers.map(&.to_s).join(", ")})
+    session.handle
+    log.info &.emit("///", {:session => session.remote_address.inspect, :ciphers => session.ciphers.map(&.to_s).join(", ")})
+    session.client.close unless session.client.closed?
     @sessions.delete(session.remote_address)
   rescue ex : Exception
     log = ProtoHackers::Log.for("isl")
