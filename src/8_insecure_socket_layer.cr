@@ -32,18 +32,23 @@ record ProtoHackers::ISLSession, client : TCPSocket, remote_address : String, ci
     @message = value
   end
 
+  def accumulator=(value)
+    @accumulator = value
+  end
+
   def process_message
     log = ProtoHackers::Log.for("isl")
 
     decoded_message = @message.map(&.unsafe_chr).join
-    # log.info &.emit("###", {:message => decoded_message})
-    max_match = decoded_message.split(",").map { |s| /(?<count>\d+)x (?<toy>[\w\s\-]+)/.match(s) }.max_by do |m|
-      count = m["count"].to_i if m
-      count || 0
-    end
+    #decoded_message.chars[-1] = '\n' if !decoded_message.empty? && decoded_message[-1] == "."
+    log.info &.emit("###", {:message => decoded_message})
+    return if decoded_message.empty? #|| decoded_message.index("\n").nil?
 
-    # log.info &.emit("<m>", {:match => max_match.inspect})
-    response = "#{max_match["count"] if max_match}x #{max_match["toy"] if max_match}#{"\n" if max_match && max_match["toy"][-1] != '\n'}"
+    items = decoded_message.split(",").map{|s| {count: s[/\d+/].to_i, original_string: s}}
+    response = items.max_by{|m| m[:count]}
+    return if response.nil?
+    response = response[:original_string]
+    response += "\n" unless response.ends_with?("\n")
 
     log.info &.emit("<r>", {:address => @client.remote_address.inspect, :ciphers => ciphers.map(&.to_s).join(", "), :response => response})
 
@@ -64,7 +69,7 @@ class ProtoHackers::InsecureSocketLayer
     log = ProtoHackers::Log.for("isl")
     log.info &.emit("---", {:address => client.remote_address.inspect})
 
-   
+
     cipher_message = [] of UInt8
     client.each_byte do |message_byte|
       if message_byte == CipherType::END.to_u8
@@ -94,27 +99,40 @@ class ProtoHackers::InsecureSocketLayer
     client.close if ProtoHackers::InsecureSocketLayer.apply_ciphers(ciphers.reverse, CIPHER_TEST.bytes, 0) == CIPHER_TEST.bytes
     return if client.closed?
     log.info &.emit("~~~", {:ciphers => ciphers.map(&.to_s).join(", ")})
-  
+
     session = @sessions[client.remote_address.to_s] ||= ProtoHackers::ISLSession.new(client, client.remote_address.to_s, ciphers, [] of UInt8, [] of UInt8, 0)
     @sessions[client.remote_address.to_s] = session if @sessions[client.remote_address.to_s].nil?
 
-    session.client.each_byte do |message_byte|
-      # log.info &.emit("...", {:message_byte => message_byte.to_s})
-      session.accumulator << message_byte
-      # log.info &.emit("...", {:accumulator => accumulator.join})
 
-      decoded_message = ProtoHackers::InsecureSocketLayer.apply_ciphers(session.ciphers.reverse, [message_byte], session.accumulator.size.to_u32 - 1, is_decode: true)
-      # log.info &.emit("...", {:decoded_message => decoded_message.map(&.unsafe_chr).join})
+    while !session.client.closed?
+      buf = Bytes.new(5000)
+      len = session.client.read(buf)
+      msg = buf[0, len]
+
+      sleep 0.1 if msg.empty?
+      next if msg.empty?
+
+      #puts msg.hexdump
+      session.accumulator += msg.to_a
+      decoded_message = ProtoHackers::InsecureSocketLayer.apply_ciphers(session.ciphers.reverse, msg.to_a, session.accumulator.size.to_u32 - msg.size.to_u32, is_decode: true)
       session.message += decoded_message
 
-      if decoded_message.map(&.unsafe_chr).join == "\n"
-        # log.info &.emit("-->", {:message => session.message.map(&.unsafe_chr).join})
+
+      split = session.message.map(&.unsafe_chr).join.split("\n")
+      split_end = split[-1] if split[-1].nil? || ""
+
+      split[..-1].each do |line|
+        next if line.empty?
+
+        session.message = line.bytes
         session.process_message
       end
+      session.message += split_end.bytes unless split_end.nil?
     end
 
+
     client.close unless client.closed?
-    @sessions.delete(client.remote_address.to_s)
+    @sessions.delete(session.remote_address)
   rescue ex : Exception
     log = ProtoHackers::Log.for("isl")
     log.error &.emit("!!!", {:exception => ex.inspect, :backtrace => ex.backtrace.join("\n")})
@@ -172,7 +190,7 @@ class ProtoHackers::InsecureSocketLayer
       when CipherType::REVERSE
         byte_copy = byte_copy.map { |c| reverse_bits(c) }
       when CipherType::XOR
-        byte_copy = byte_copy.map { |c| (c ^ (cipher.extra_info % 256)) }
+        byte_copy = byte_copy.map { |c| (c ^ cipher.extra_info) }
       when CipherType::XORPOS
         byte_copy = byte_copy.map_with_index { |c, i| (c ^ ((pos.to_u8! &+ i.to_u8!)).to_u8!) }
       when CipherType::ADD
