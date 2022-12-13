@@ -38,9 +38,8 @@ record ProtoHackers::ISLSession, client : TCPSocket, remote_address : String, ci
 
   def handle
     log = ProtoHackers::Log.for("isl")
-    while !@client.closed?
-      sleep 0.1
-      buf = Bytes.new(5000)
+    until @client.closed?
+      buf = Bytes.new(100)
       len = @client.read(buf)
       msg = buf[0, len]
 
@@ -84,7 +83,7 @@ class ProtoHackers::InsecureSocketLayer
     log = ProtoHackers::Log.for("isl")
     log.info &.emit("---", {:address => client.remote_address.inspect})
 
-
+    #client.read_timeout = 10.seconds
     cipher_message = [] of UInt8
     client.each_byte do |message_byte|
       if message_byte == CipherType::END.to_u8
