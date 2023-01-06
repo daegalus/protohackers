@@ -9,6 +9,7 @@ require "./5_mob_in_the_middle"
 require "./6_speed_daemon"
 require "./7_line_reversal"
 require "./8_insecure_socket_layer"
+require "./9_job_centre"
 
 module ProtoHackers
   VERSION = "0.1.0"
@@ -50,7 +51,8 @@ module ProtoHackers
     # spawn ProtoHackers::MobInTheMiddle.new("0.0.0.0", 10006)
     # spawn ProtoHackers::SpeedDaemon.new("0.0.0.0", 10007)
     # spawn ProtoHackers::LineReversal.new("0.0.0.0", 10008)
-    spawn ProtoHackers::InsecureSocketLayer.new("0.0.0.0", 10009)
+    # spawn ProtoHackers::InsecureSocketLayer.new("0.0.0.0", 10009)
+    spawn ProtoHackers::JobCentre.new("0.0.0.0", 10010)
     sleep
   end
 end
